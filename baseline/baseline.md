@@ -59,7 +59,18 @@ model.predict_topk(query_df, k) -> list[list[str]]   # 每列 query 回傳 top-k
 2. 從這個 `start_latlng` 出發最常去的(補到 K 個還不夠)
 3. 全體熱門補到 K 個
 
-**為什麼這通常是最強的 baseline**:重度使用者用個人歷史命中,輕度/冷啟動使用者用 start→end 共現補足,兩種使用者都照顧到。對「該 user 沒去過但同區域熱門」的場景特別有效——這也是為什麼它的 Hit@5 比純 UserHistory 高一截。
+**為什麼這是強 baseline**:重度使用者用個人歷史命中,輕度/冷啟動使用者用 start→end 共現補足,兩種使用者都照顧到。但三層都**沒用到 context**(hour_type / is_holiday),這也是下一層可以改進的點。
+
+---
+
+## 6. `HybridContextCascade` — 加入 context tier 的四層 cascade
+**邏輯**:在 `HybridUserStartEnd` 的最前面加上 `user × (hour_type, is_holiday)` tier:
+1. 該 user 在這個 context 下最常去的
+2. 該 user 全部歷史最常去的
+3. 從這個 `start_latlng` 出發最常去的
+4. 全體熱門
+
+**設計動機**:`UserContextHistory` 在 Hit@1 贏 `HybridUserStartEnd` 是因為 context;反之在 Hit@5 輸是因為候選不夠多。這個設計把兩者的優勢加起來:用 context 推 top-1,不夠再拿 user / start 訓有來補。
 
 ---
 
@@ -69,23 +80,25 @@ model.predict_topk(query_df, k) -> list[list[str]]   # 每列 query 回傳 top-k
 
 **整體指標** (K=1 / 3 / 5):
 
-| model                  | Hit@1  | Hit@3  | Hit@5  | MRR@5  | NDCG@5 |
-| ---------------------- | ------ | ------ | ------ | ------ | ------ |
-| `GlobalPopularity`     | 0.0094 | 0.0197 | 0.0264 | 0.0153 | 0.0180 |
-| `UserHistory`          | 0.2165 | 0.3258 | 0.3513 | 0.2721 | 0.2921 |
-| `UserContextHistory`   | **0.2496** | 0.3315 | 0.3541 | 0.2915 | 0.3073 |
-| `StartEndCoOccurrence` | 0.0483 | 0.0887 | 0.1116 | 0.0711 | 0.0812 |
-| `HybridUserStartEnd`   | 0.2293 | **0.3565** | **0.3910** | **0.2947** | **0.3190** |
+| model                   | Hit@1  | Hit@3  | Hit@5  | MRR@5  | NDCG@5 |
+| ----------------------- | ------ | ------ | ------ | ------ | ------ |
+| `GlobalPopularity`      | 0.0094 | 0.0197 | 0.0264 | 0.0153 | 0.0180 |
+| `UserHistory`           | 0.2165 | 0.3258 | 0.3513 | 0.2721 | 0.2921 |
+| `UserContextHistory`    | 0.2496 | 0.3315 | 0.3541 | 0.2915 | 0.3073 |
+| `StartEndCoOccurrence`  | 0.0483 | 0.0887 | 0.1116 | 0.0711 | 0.0812 |
+| `HybridUserStartEnd`    | 0.2293 | 0.3565 | 0.3910 | 0.2947 | 0.3190 |
+| **`HybridContextCascade`**  | **0.2625** | **0.3622** | **0.3938** | **0.3142** | **0.3342** |
 
 **訓練 / 預測時間**:
 
-| model                  | fit   | predict (100k rows) |
-| ---------------------- | ----- | ------------------- |
-| `GlobalPopularity`     | 0.1s  | 0.1s                |
-| `UserHistory`          | 1.3s  | 0.3s                |
-| `UserContextHistory`   | 1.9s  | 0.3s                |
-| `StartEndCoOccurrence` | 0.9s  | 7.3s                |
-| `HybridUserStartEnd`   | 1.9s  | 5.0s                |
+| model                   | fit   | predict (100k rows) |
+| ----------------------- | ----- | ------------------- |
+| `GlobalPopularity`      | 0.1s  | 0.1s                |
+| `UserHistory`           | 1.3s  | 0.3s                |
+| `UserContextHistory`    | 1.9s  | 0.3s                |
+| `StartEndCoOccurrence`  | 0.9s  | 7.3s                |
+| `HybridUserStartEnd`    | 1.9s  | 5.0s                |
+| `HybridContextCascade`  | 2.4s  | 5.0s                |
 
 > `GlobalPopularity` 的 predict 原本要 154.6s,優化後降到 0.1s(**~1500x**),作法見下方「附錄: GlobalPopularity 預測優化」。
 
@@ -105,90 +118,27 @@ model.predict_topk(query_df, k) -> list[list[str]]   # 每列 query 回傳 top-k
    - 但放進 Hybrid 之後,Hit@5 從 35.1%(UserHistory)→ 39.1%(Hybrid),**多賺 4pp**
    - 解讀:它能命中的是「該 user 沒去過、但同區域大家會去」的地點,屬於「探索性候選」,跟個人歷史不重疊,所以加進來純賺。
 
-5. **`HybridUserStartEnd` 在 Hit@5 / NDCG@5 全面最佳,但 Hit@1 輸給 `UserContextHistory`**
+5. **`HybridUserStartEnd` 在 Hit@5 / NDCG@5 及格,但 Hit@1 輸給 `UserContextHistory`**
    - 因為 Hybrid 的 tier 1 沒用 context,排序時較弱
-   - **如果關心「第一個推薦準不準」(直接 autofill 場景)→ 選 `UserContextHistory`**
-   - **如果關心「top-5 名單命中率」(下拉選單場景)→ 選 `HybridUserStartEnd`**
-   - 下一步可以做的:把 context 加進 Hybrid 的 tier 1,理論上能兩邊都贏
+   - 這個觀察促成了下面的 `HybridContextCascade`
 
-6. **MRR 跟 Hit@K 趨勢一致** — 沒有出現「Hit 高但 MRR 低」這種「猜對但排很後面」的怪狀況,代表模型排序是合理的。
+6. **`HybridContextCascade` 是新的全面贏家** — 加入 user × context tier 後:
+   - Hit@1: 0.2293 → **0.2625**(+3.3pp,甚至超過 `UserContextHistory` 的 0.2496)
+   - Hit@5: 0.3910 → **0.3938**(+0.3pp)
+   - NDCG@5: 0.3190 → **0.3342**(+1.5pp)
+   - 預測時間幾乎不變(5.0s),是全 K 都贏的新 SOTA。
 
-7. **`GlobalPopularity` 原本的 154 秒是實作問題,不是模型慢** — 已優化到 0.1 秒(作法見下方附錄)。`UserHistory` / `UserContextHistory` 因為很多 user 的歷史很短,所以 predict 反而最快。
+7. **MRR 跟 Hit@K 趨勢一致** — 沒有出現「Hit 高但 MRR 低」這種「猜對但排很後面」的怪狀況,代表模型排序是合理的。
+
+8. **`GlobalPopularity` 原本的 154 秒是實作問題,不是模型慢** — 已優化到 0.1 秒(作法見下方附錄)。`UserHistory` / `UserContextHistory` 因為很多 user 的歷史很短,所以 predict 反而最快。
 
 ### 下一步方向
 
-模型要打贏的目標分數:**Hit@5 ≥ 0.39 / NDCG@5 ≥ 0.32**(`HybridUserStartEnd` 的水準)。
+目前 SOTA:**`HybridContextCascade` (Hit@5 = 0.3938 / NDCG@5 = 0.3342)**。
 
 可以嘗試:
-- 把 context 加進 Hybrid 的 tier 1(預期能拉高 Hit@1)
-- 加時間衰減(近期紀錄權重更大),老資料的 weight 衰減
+- 加權分數融合(把 user × ctx / user / start / global 的 log-count 線性組合後排序),在 val 上 grid search 權重
+- 加時間衰減(近期紀錄權重更大)
+- 把 `start × context` 也快取起來,加進 Cascade 的 tier 3 之前
 - ItemCF / UserCF / Matrix Factorization
 - 用 `start_latlng + context` 學 embedding,做 ANN 檢索
-
----
-
-## 附錄: `GlobalPopularity` 預測優化
-
-### 原本的慢實作
-
-```python
-def predict_topk(self, query_df, k):
-    starts = query_df["start_latlng"].tolist()
-    return [_topk_from_counter(self._counter, k, exclude=s) for s in starts]
-    # _topk_from_counter 內部呼叫 self._counter.most_common(k + 1)
-```
-
-**問題**:`Counter.most_common(k+1)` 內部用 heap 從 N 個唯一下車點挑出 top-(k+1)。
-- 複雜度 ~ `O(N · log(k+1))`,而 `N ≈ 60k` 個唯一 `end_latlng`。
-- 每一筆 query 都重算一次,總成本 `O(R · N · log K)`,R = 10 萬列。
-- 實測 154.6 秒,大部分時間都在 heap 排序同一份計數結果。
-
-### 優化後
-
-```python
-def fit(self, train_df):
-    self._counter = Counter(train_df["end_latlng"].tolist())
-    self.global_top = [x for x, _ in self._counter.most_common(50)]  # fit 階段只算一次
-    return self
-
-def predict_topk(self, query_df, k):
-    global_top = self.global_top  # 已排序好
-    out = []
-    for start in query_df["start_latlng"].values:
-        picks = []
-        for x in global_top:        # 線性掃 ≤ 50 個
-            if x == start: continue
-            picks.append(x)
-            if len(picks) == k: break
-        out.append(picks)
-    return out
-```
-
-**核心想法**:全體熱門排序與 query 完全無關,應該在 `fit` 階段算一次就好,`predict` 只是線性掃過排好的清單,把該筆的 `start_latlng` 過濾掉。
-
-### 複雜度比較
-
-|       | 原本                       | 優化後                |
-| ----- | -------------------------- | --------------------- |
-| fit   | O(R) 計數                  | O(R) 計數 + O(N log K) 排一次 |
-| predict (每筆) | O(N log K)         | O(K)                  |
-| predict (R 筆) | **O(R · N log K)** | **O(R · K)**          |
-
-以 R=100k、N≈60k、K=5 代入,理論加速約 `N log K / K ≈ 26,000 倍`。
-
-### 實測結果
-
-| 階段       | 原本   | 優化後 |
-| ---------- | ------ | ------ |
-| fit        | 0.1s   | 0.1s   |
-| predict    | 154.6s | **0.1s** |
-
-實測 **~1500x** 加速(沒到理論上限是因為 Python 迴圈與 tqdm overhead),且輸出結果**完全相同**(Hit@K / MRR / NDCG 數字一致)。
-
-### 相同思路也可套用到其他 baseline
-
-- `UserHistory.predict`:目前每次 `Counter.most_common()` 都會把該 user 全部歷史排序;若改成 fit 階段就把每個 user 的 top-50 算好,predict 也可再加速(目前已經 0.3s,優化效益較小)。
-- `StartEndCoOccurrence.predict`:目前 7.3s,主因是每個 `start_latlng` 的候選清單在每筆 query 都重新排序。fit 階段預存每個 start 的 top-50 即可降到 < 1s。
-- `HybridUserStartEnd.predict`:同上,結合上述兩個快取後預期可降到 ~1s。
-
-這些優化跟模型品質無關,純粹是工程實作,需要的時候再做即可。

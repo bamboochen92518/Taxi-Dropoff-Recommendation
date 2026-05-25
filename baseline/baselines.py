@@ -276,10 +276,80 @@ class HybridUserStartEnd:
         return out
 
 
+# ---------------------------------------------------------------------------
+# 6. Cascade: user×context → user → start→end → global (在 Hybrid 前面加 context tier)
+# ---------------------------------------------------------------------------
+class HybridContextCascade:
+    name = "HybridContextCascade"
+
+    def __init__(self) -> None:
+        self.uc_ctx: dict[tuple, Counter] = {}
+        self.user_counter: dict[int, Counter] = {}
+        self.start_counter: dict[str, Counter] = {}
+        self.global_top: list[str] = []
+
+    def fit(self, train_df: pd.DataFrame) -> "HybridContextCascade":
+        gc: Counter = Counter()
+        uc_user: dict[int, Counter] = defaultdict(Counter)
+        uc_ctx: dict[tuple, Counter] = defaultdict(Counter)
+        sc: dict[str, Counter] = defaultdict(Counter)
+        cols = train_df[["uid_hash", "start_latlng", "end_latlng",
+                         "hour_type", "is_holiday"]].values
+        for uid, start, end, hour, holiday in tqdm(cols, desc=f"{self.name}.fit", leave=False):
+            uc_user[uid][end] += 1
+            uc_ctx[(uid, hour, holiday)][end] += 1
+            sc[start][end] += 1
+            gc[end] += 1
+        self.uc_ctx = dict(uc_ctx)
+        self.user_counter = dict(uc_user)
+        self.start_counter = dict(sc)
+        self.global_top = [x for x, _ in gc.most_common(50)]
+        return self
+
+    def predict_topk(self, query_df: pd.DataFrame, k: int) -> list[list[str]]:
+        out: list[list[str]] = []
+        cols = query_df[["uid_hash", "start_latlng", "hour_type", "is_holiday"]].values
+        for uid, start, hour, holiday in tqdm(cols, desc=f"{self.name}.predict", leave=False):
+            picks: list[str] = []
+            seen: set[str] = set()
+            # tier 1: user × context
+            c = self.uc_ctx.get((uid, hour, holiday))
+            if c is not None:
+                for x, _ in c.most_common():
+                    if x == start or x in seen: continue
+                    picks.append(x); seen.add(x)
+                    if len(picks) == k: break
+            # tier 2: user 全部歷史
+            if len(picks) < k:
+                c = self.user_counter.get(uid)
+                if c is not None:
+                    for x, _ in c.most_common():
+                        if x == start or x in seen: continue
+                        picks.append(x); seen.add(x)
+                        if len(picks) == k: break
+            # tier 3: start→end
+            if len(picks) < k:
+                c = self.start_counter.get(start)
+                if c is not None:
+                    for x, _ in c.most_common():
+                        if x == start or x in seen: continue
+                        picks.append(x); seen.add(x)
+                        if len(picks) == k: break
+            # tier 4: global
+            if len(picks) < k:
+                for x in self.global_top:
+                    if x == start or x in seen: continue
+                    picks.append(x); seen.add(x)
+                    if len(picks) == k: break
+            out.append(picks)
+        return out
+
+
 ALL_BASELINES: list[type] = [
     GlobalPopularity,
     UserHistory,
     UserContextHistory,
     StartEndCoOccurrence,
     HybridUserStartEnd,
+    HybridContextCascade,
 ]
