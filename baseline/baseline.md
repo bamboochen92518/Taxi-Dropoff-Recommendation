@@ -74,9 +74,34 @@ model.predict_topk(query_df, k) -> list[list[str]]   # 每列 query 回傳 top-k
 
 ---
 
+## 7. `HybridContextPlus` — 高信心 user×start hint + context cascade
+**邏輯**:在 `HybridContextCascade` 前面只插入一個「高信心」個人上車點 hint:
+1. 若 `(uid_hash, start_latlng, hour_type, is_holiday)` 的最熱門下車點在 train 至少出現 2 次,先放第 1 名
+2. 否則若 `(uid_hash, start_latlng)` 的最熱門下車點在 train 至少出現 2 次,先放第 1 名
+3. 接著回到原本 `HybridContextCascade` 的順序補滿: user × context → user → start → global
+
+**設計動機**:`user × start` 對 top-1 很有幫助,但如果整批候選都提前放進來,會壓掉 user history / start co-occurrence,導致 Hit@5 下降。這版只拿 1 個高信心 hint 做 rerank,因此同時提升 MRR/NDCG 並保住 top-5 召回。
+
+---
+
+## 8. `SuggestionWeightedFusion` — suggestion 高召回候選 + train 訊號重排
+**邏輯**:先從 `address_v2_suggestion.parquet` 抓該 user 的候選下車點,再用 train 裡的訊號加權重排:
+1. user suggestion 候選,取 top 30
+2. `user × start × (hour_type, is_holiday)`
+3. `user × start`
+4. `user × (hour_type, is_holiday)`
+5. user 全部歷史
+6. `start × (hour_type, is_holiday)`、start、global context、global 補分
+
+**速度設計**:fit 時把每個 bucket 的 top-N 先轉成 scored list,predict 時只掃短 list 並用 `heapq.nlargest` 取 top-K,避免每列重新對 `Counter` 排序。scoring 使用 `sqrt(count / total) + rank bonus`,並在 val 上搜尋各訊號權重。
+
+**重要注意**:這版使用 suggestion 表作為候選來源。
+
+---
+
 ## 在 `val` split 上的實測結果
 
-訓練 750,000 筆,驗證 100,000 筆(時間切分 80/10/10)。
+訓練 750,000 筆,驗證 100,000 筆(時間切分 75/10/15)。
 
 **整體指標** (K=1 / 3 / 5):
 
@@ -87,7 +112,13 @@ model.predict_topk(query_df, k) -> list[list[str]]   # 每列 query 回傳 top-k
 | `UserContextHistory`    | 0.2496 | 0.3315 | 0.3541 | 0.2915 | 0.3073 |
 | `StartEndCoOccurrence`  | 0.0483 | 0.0887 | 0.1116 | 0.0711 | 0.0812 |
 | `HybridUserStartEnd`    | 0.2293 | 0.3565 | 0.3910 | 0.2947 | 0.3190 |
-| **`HybridContextCascade`**  | **0.2625** | **0.3622** | **0.3938** | **0.3142** | **0.3342** |
+| `HybridContextCascade`  | 0.2625 | 0.3622 | 0.3938 | 0.3142 | 0.3342 |
+| **`HybridContextPlus`** | **0.2723** | **0.3634** | **0.3941** | **0.3198** | **0.3385** |
+| **`SuggestionWeightedFusion`** | **0.4115** | **0.6346** | **0.7458** | **0.5340** | **0.5867** |
+
+在 `test` split 上也維持領先:
+`SuggestionWeightedFusion` Hit@5 = 0.7399 / MRR@5 = 0.5238 / NDCG@5 = 0.5776。
+
 
 **訓練 / 預測時間**:
 
@@ -99,6 +130,8 @@ model.predict_topk(query_df, k) -> list[list[str]]   # 每列 query 回傳 top-k
 | `StartEndCoOccurrence`  | 0.9s  | 7.3s                |
 | `HybridUserStartEnd`    | 1.9s  | 5.0s                |
 | `HybridContextCascade`  | 2.4s  | 5.0s                |
+| `HybridContextPlus`     | 11.2s | 16.9s               |
+| `SuggestionWeightedFusion` | 55.2s | 7.0s             |
 
 > `GlobalPopularity` 的 predict 原本要 154.6s,優化後降到 0.1s(**~1500x**),作法見下方「附錄: GlobalPopularity 預測優化」。
 
@@ -122,23 +155,39 @@ model.predict_topk(query_df, k) -> list[list[str]]   # 每列 query 回傳 top-k
    - 因為 Hybrid 的 tier 1 沒用 context,排序時較弱
    - 這個觀察促成了下面的 `HybridContextCascade`
 
-6. **`HybridContextCascade` 是新的全面贏家** — 加入 user × context tier 後:
+6. **`HybridContextCascade` 把 context 和召回補齊** — 加入 user × context tier 後:
    - Hit@1: 0.2293 → **0.2625**(+3.3pp,甚至超過 `UserContextHistory` 的 0.2496)
    - Hit@5: 0.3910 → **0.3938**(+0.3pp)
    - NDCG@5: 0.3190 → **0.3342**(+1.5pp)
-   - 預測時間幾乎不變(5.0s),是全 K 都贏的新 SOTA。
+   - 預測時間幾乎不變(5.0s),是很強的 cascade baseline。
 
-7. **MRR 跟 Hit@K 趨勢一致** — 沒有出現「Hit 高但 MRR 低」這種「猜對但排很後面」的怪狀況,代表模型排序是合理的。
+7. **`HybridContextPlus` 是 train-only SOTA** — 只插入 1 個高信心 `user × start` hint 後:
+   - Hit@1: 0.2625 → **0.2723**(+1.0pp)
+   - Hit@5: 0.3938 → **0.3941**(+0.03pp)
+   - NDCG@5: 0.3342 → **0.3385**(+0.43pp)
+   - 解讀:新增訊號主要改善排序品質(MRR/NDCG),top-5 召回則小幅增加。
 
-8. **`GlobalPopularity` 原本的 154 秒是實作問題,不是模型慢** — 已優化到 0.1 秒(作法見下方附錄)。`UserHistory` / `UserContextHistory` 因為很多 user 的歷史很短,所以 predict 反而最快。
+8. **`SuggestionWeightedFusion` 是 overall SOTA** — suggestion 表提供極強候選召回,再用 train 訊號重排:
+   - Hit@1: 0.2723 → **0.4115**(+13.9pp vs train-only SOTA)
+   - Hit@5: 0.3941 → **0.7458**(+35.2pp)
+   - NDCG@5: 0.3385 → **0.5867**(+24.8pp)
+   - predict 100k 只要約 7.0s,比 `HybridContextPlus` 更快;fit 約 55s,主要花在建 suggestion/user bucket 的 top-N 快取。
+   - 相比上一版 suggestion fusion,Hit@1 0.4003 → **0.4115**,NDCG@5 0.5788 → **0.5867**,速度幾乎不變。
+
+9. **MRR 跟 Hit@K 趨勢一致** — 沒有出現「Hit 高但 MRR 低」這種「猜對但排很後面」的怪狀況,代表模型排序是合理的。
+
+10. **`GlobalPopularity` 原本的 154 秒是實作問題,不是模型慢** — 已優化到 0.1 秒(作法見下方附錄)。`UserHistory` / `UserContextHistory` 因為很多 user 的歷史很短,所以 predict 反而最快。
 
 ### 下一步方向
 
-目前 SOTA:**`HybridContextCascade` (Hit@5 = 0.3938 / NDCG@5 = 0.3342)**。
+目前最高分 baseline:
+- overall:**`SuggestionWeightedFusion` (val Hit@5 = 0.7458 / NDCG@5 = 0.5867)**
+- train-only:**`HybridContextPlus` (val Hit@5 = 0.3941 / NDCG@5 = 0.3385)**
 
 可以嘗試:
-- 加權分數融合(把 user × ctx / user / start / global 的 log-count 線性組合後排序),在 val 上 grid search 權重
+- 繼續 grid search `SuggestionWeightedFusion` 的權重與 top-N
+- 若規則要求 train-only,再做 user × start / user × ctx / user / start / global 的加權分數融合
 - 加時間衰減(近期紀錄權重更大)
-- 把 `start × context` 也快取起來,加進 Cascade 的 tier 3 之前
+- 調 `user × start` hint 的門檻(目前是出現至少 2 次)與最多插入數量
 - ItemCF / UserCF / Matrix Factorization
 - 用 `start_latlng + context` 學 embedding,做 ANN 檢索

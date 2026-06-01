@@ -72,12 +72,15 @@ pip install pandas pyarrow tqdm
 - `data_loader.py` — 依 `created_at` 時間切分 train/val/test (75/10/15),提供 `load_split(split)` 介面。
 - `evaluate.py` — Top-K 推薦評估指標(Hit@K / MRR / NDCG@K),任何推薦模型都可重用。
 - `baseline/` — Baseline 推薦器與評估腳本,詳見 [`baseline/baseline.md`](baseline/baseline.md)。
-  - `baseline/baselines.py` — 5 個 baseline 推薦器
+  - `baseline/baselines.py` — 8 個 baseline 推薦器
   - `baseline/run_baselines.py` — 一鍵跑全部 baseline 並對比結果
 
 ```bash
 python -m baseline.run_baselines                 # 在 val 上跑,K=1,3,5
+python -m baseline.run_baselines --models SuggestionWeightedFusion
+python -m baseline.run_baselines --models HybridContextPlus  # train-only 最強版
 python -m baseline.run_baselines --split test    # 換到 test
+python -m baseline.run_baselines --list-models   # 列出可用模型
 python -m baseline.run_baselines --segment       # 加上 per-segment 拆解
 ```
 

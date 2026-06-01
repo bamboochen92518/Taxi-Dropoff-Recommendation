@@ -21,9 +21,26 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--split", choices=["val", "test"], default="val")
     parser.add_argument("--k", type=int, nargs="+", default=[1, 3, 5])
+    parser.add_argument("--models", nargs="+", default=None,
+                        help="只跑指定模型名稱,例如 HybridContextPlus")
+    parser.add_argument("--list-models", action="store_true",
+                        help="列出可用模型名稱後結束")
     parser.add_argument("--segment", action="store_true",
                         help="額外印出 per-segment 評估")
     args = parser.parse_args()
+
+    model_by_name = {cls.name: cls for cls in ALL_BASELINES}
+    if args.list_models:
+        print("\n".join(model_by_name))
+        return
+    if args.models is None:
+        baseline_classes = ALL_BASELINES
+    else:
+        unknown = [name for name in args.models if name not in model_by_name]
+        if unknown:
+            choices = ", ".join(model_by_name)
+            raise ValueError(f"unknown model(s): {unknown}; choices: {choices}")
+        baseline_classes = [model_by_name[name] for name in args.models]
 
     print(f"[1/3] 載入 train + {args.split} ...")
     t0 = time.time()
@@ -38,7 +55,7 @@ def main() -> None:
     print(f"\n[2/3] 訓練 + 預測各 baseline (k={max_k}) ...")
     preds_by_model: dict[str, list[list[str]]] = {}
     per_k_rows: dict[int, list[dict]] = {k: [] for k in args.k}
-    for cls in ALL_BASELINES:
+    for cls in baseline_classes:
         model = cls()
         t0 = time.time()
         model.fit(train_df)
