@@ -70,10 +70,12 @@ pip install pandas pyarrow tqdm
 - `read_parquet.py` — 讀取兩個 parquet,印出 shape / dtypes / head。
 - `explore_users.py` — 統計使用者數量與每個用戶的訂車筆數分佈。
 - `data_loader.py` — 依 `created_at` 時間切分 train/val/test (75/10/15),提供 `load_split(split)` 介面。
-- `evaluate.py` — Top-K 推薦評估指標(Hit@K / MRR / NDCG@K),任何推薦模型都可重用。
+- `evaluate.py` — Top-K 推薦評估指標(Hit@K / MRR / NDCG@K),提供 `evaluate` / `evaluate_by_segment` / `evaluate_trip_segment` / `user_freq_bucket` / `trip_count_segment`,任何推薦模型都可重用。
 - `baseline/` — Baseline 推薦器與評估腳本,詳見 [`baseline/baseline.md`](baseline/baseline.md)。
   - `baseline/baselines.py` — 8 個 baseline 推薦器
   - `baseline/run_baselines.py` — 一鍵跑全部 baseline 並對比結果
+- `lightGBM/` — 兩階段 LambdaRank 推薦器,詳見 [`lightGBM/report_notfinal.md`](lightGBM/report_notfinal.md)。
+  - `lightGBM/linego_good_evaluate.ipynb` — Colab 版,GPU 訓練 + checkpoint resume
 
 ```bash
 python -m baseline.run_baselines                 # 在 val 上跑,K=1,3,5
@@ -81,7 +83,9 @@ python -m baseline.run_baselines --models SuggestionWeightedFusion
 python -m baseline.run_baselines --models HybridContextPlus  # train-only 最強版
 python -m baseline.run_baselines --split test    # 換到 test
 python -m baseline.run_baselines --list-models   # 列出可用模型
-python -m baseline.run_baselines --segment       # 加上 per-segment 拆解
+python -m baseline.run_baselines --segment       # 加上 hour/holiday/freq 拆解
+python -m baseline.run_baselines --trip-segment  # >=20 / <20 trips 兩段比較
+python -m baseline.run_baselines --trip-segment --min-trips 50  # 自訂切點
 ```
 
 ## 資料切分
