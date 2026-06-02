@@ -1,4 +1,4 @@
-# 下車地址推薦系統(evaluate的方法有問題，還在修改，目前的結果跟baseline的suggestionweightedfusion應該差不多)
+# 下車地址推薦系統(evaluate的方法有問題，還在修改，目前的結果跟baseline的SuggestionWeightedFusion應該差不多)
 ## Drop-off Address Recommendation System
 ### 模型訓練與評估報告 | AI 課程期末專案 × LineGO | 2026 年 6 月
 
