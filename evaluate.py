@@ -86,3 +86,29 @@ def user_freq_bucket(train_df: pd.DataFrame, query_df: pd.DataFrame) -> pd.Serie
     bins = [-1, 0, 5, 20, 100, 10_000_000]
     labels = ["new(0)", "1-5", "6-20", "21-100", "100+"]
     return pd.cut(q_counts, bins=bins, labels=labels)
+
+
+def trip_count_segment(
+    train_df: pd.DataFrame, query_df: pd.DataFrame, min_trips: int = 20,
+) -> pd.Series:
+    """以 train 中該 user 的歷史筆數為基準,把 query 切成 >=N / <N 兩段。"""
+    counts = train_df.groupby("uid_hash").size()
+    q_counts = query_df["uid_hash"].map(counts).fillna(0).astype(int)
+    return pd.Series(
+        np.where(q_counts >= min_trips, f">={min_trips}", f"<{min_trips}"),
+        name="trip_segment",
+        index=query_df.index,
+    )
+
+
+def evaluate_trip_segment(
+    predictions: list[list[str]],
+    truths: list[str],
+    train_df: pd.DataFrame,
+    query_df: pd.DataFrame,
+    k: int,
+    min_trips: int = 20,
+) -> pd.DataFrame:
+    """便利包裝: 直接吐出 >=N / <N 兩段的 evaluate_by_segment 結果。"""
+    seg = trip_count_segment(train_df, query_df, min_trips=min_trips)
+    return evaluate_by_segment(predictions, truths, seg, k=k)

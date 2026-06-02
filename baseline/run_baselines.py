@@ -14,7 +14,9 @@ import pandas as pd
 
 from baseline.baselines import ALL_BASELINES
 from data_loader import load_split
-from evaluate import evaluate, evaluate_by_segment, user_freq_bucket
+from evaluate import (
+    evaluate, evaluate_by_segment, evaluate_trip_segment, user_freq_bucket,
+)
 
 
 def main() -> None:
@@ -27,6 +29,10 @@ def main() -> None:
                         help="列出可用模型名稱後結束")
     parser.add_argument("--segment", action="store_true",
                         help="額外印出 per-segment 評估")
+    parser.add_argument("--trip-segment", action="store_true",
+                        help="額外印出 >=N / <N trips 兩段評估")
+    parser.add_argument("--min-trips", type=int, default=20,
+                        help="--trip-segment 的切點 (預設 20)")
     args = parser.parse_args()
 
     model_by_name = {cls.name: cls for cls in ALL_BASELINES}
@@ -86,6 +92,24 @@ def main() -> None:
                 print(f"\n# {model_name} — by {col} (K={max_k})")
                 df = evaluate_by_segment(preds, truths, eval_df[col], k=max_k)
                 print(df.to_string(index=False))
+
+    if args.trip_segment:
+        n = args.min_trips
+        print(f"\n--- 行程數 >={n} / <{n} 兩段評估 ---")
+        for k in args.k:
+            rows = []
+            for model_name, preds in preds_by_model.items():
+                df = evaluate_trip_segment(
+                    preds, truths, train_df, eval_df, k=k, min_trips=n,
+                )
+                row = {"model": model_name}
+                for _, r in df.iterrows():
+                    tag = r["segment"]
+                    row[f"Hit@{k}({tag})"] = r[f"Hit@{k}"]
+                    row[f"NDCG@{k}({tag})"] = r[f"NDCG@{k}"]
+                rows.append(row)
+            print(f"\n[K={k}]")
+            print(pd.DataFrame(rows).to_string(index=False))
 
 
 if __name__ == "__main__":
