@@ -15,6 +15,35 @@ model.predict_topk(query_df, k) -> list[list[str]]   # 每列 query 回傳 top-k
 
 ---
 
+## Baseline 1–7 之間的演進關係
+
+Baselines 1–7 form a progression that starts from a no-context popularity model, incrementally adds user, context, and start-point signals, combines them into a multi-tier cascade, and finally inserts a high-confidence `user × start` hint on top to further improve top-1 ranking.
+
+```mermaid
+flowchart TD
+    B1["1. GlobalPopularity<br/>(no signal)"]
+    B2["2. UserHistory<br/>(per-user history)"]
+    B3["3. UserContextHistory<br/>(user × context)"]
+    B4["4. StartEndCoOccurrence<br/>(start → end co-occurrence)"]
+    B5["5. HybridUserStartEnd<br/>(3-tier cascade)"]
+    B6["6. HybridContextCascade<br/>(4-tier cascade)"]
+    B7["7. HybridContextPlus<br/>(cascade + user × start hint)"]
+
+    B1 -- "+ personalization (uid_hash)" --> B2
+    B2 -- "+ context (hour_type, is_holiday)" --> B3
+    B1 -- "+ start_latlng signal" --> B4
+
+    B2 -- "combine" --> B5
+    B4 -- "combine" --> B5
+
+    B3 -- "prepend user × context tier" --> B6
+    B5 -- "add a tier on top" --> B6
+
+    B6 -- "prepend high-confidence<br/>user × start hint" --> B7
+```
+
+---
+
 ## 1. `GlobalPopularity` — 全體熱門
 **邏輯**:不看任何 context,直接回傳全體訓練資料中出現次數最多的 `end_latlng`。
 
