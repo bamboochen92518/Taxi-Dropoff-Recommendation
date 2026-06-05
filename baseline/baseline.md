@@ -20,7 +20,7 @@ model.predict_topk(query_df, k) -> list[list[str]]   # 每列 query 回傳 top-k
 Baselines 1–7 form a progression that starts from a no-context popularity model, incrementally adds user, context, and start-point signals, combines them into a multi-tier cascade, and finally inserts a high-confidence `user × start` hint on top to further improve top-1 ranking.
 
 ```mermaid
-flowchart TD
+flowchart LR
     B1["1. GlobalPopularity<br/>(no signal)"]
     B2["2. UserHistory<br/>(per-user history)"]
     B3["3. UserContextHistory<br/>(user × context)"]
