@@ -9,7 +9,6 @@
     preds = model.predict_topk(val_df, k=5)
 """
 
-
 from __future__ import annotations
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -26,16 +25,13 @@ class SuggestionFusion:
     候選集: 該 user 在 suggestion table 中的所有 end_latlng
            (recall = 100%, 中位數 6 個候選)
 
-    排序信號 (9 個):
+    排序信號 (6 個):
         0. user × (hour, holiday, dow) → end  [from training]
         1. user × (hour, holiday)      → end  [from training]
-        2. user overall                → end  [from training]
-        3. user × start                → end  [from training]
-        4. (start, hour, holiday)      → end  [from training, all users]
-        5. start → end                        [from training, all users]
-        6. global popularity                  [from training]
-        7. user × address (POI)               [from training]
-        8. 1/距離 (start → end)               [from suggestion latlng_pin]
+        2. user × start                → end  [from training]
+        3. (start, hour, holiday)      → end  [from training, all users]
+        4. start → end                        [from training, all users]
+        5. 1/距離 (start → end)               [from suggestion latlng_pin]
     """
 
     name = "SuggestionFusion"
@@ -47,16 +43,14 @@ class SuggestionFusion:
         decay_rate: float = 0.0,
     ) -> None:
         self.decay_rate = decay_rate
-        self.weights = weights or [4.0, 5.0, 5.0, 3.0, 0.3, 0.5, 0.1, 2.0, 0.5]
-        assert len(self.weights) == 9, f"需要 9 個權重, 收到 {len(self.weights)}"
+        self.weights = weights or [3.0, 10.0, 10.0, 3.0, 0.5, 0.1]
+        assert len(self.weights) == 6, f"需要 6 個權重, 收到 {len(self.weights)}"
 
         # --- 從 suggestion table 建立候選集 ---
         # user → list of end_latlng
         self._user_sugg_dests: dict = {}
         # end_latlng → end_latlng_pin (完整座標, 算距離用)
         self._latlng_to_pin: dict[str, str] = {}
-        # end_latlng → end_address
-        self._latlng_to_addr: dict[str, str] = {}
 
         # 建 user → set(end_latlng)
         user_dests: dict = defaultdict(set)
@@ -64,32 +58,24 @@ class SuggestionFusion:
             user_dests[uid].add(end)
         self._user_sugg_dests = {uid: list(dests) for uid, dests in user_dests.items()}
 
-        # 建 latlng → pin 和 latlng → address 映射
+        # 建 latlng → pin 映射
         if "end_latlng_pin" in sugg_df.columns:
             for latlng, pin in zip(sugg_df["end_latlng"].values,
                                    sugg_df["end_latlng_pin"].values):
                 self._latlng_to_pin[latlng] = str(pin)
 
-        if "end_address" in sugg_df.columns:
-            for latlng, addr in zip(sugg_df["end_latlng"].values,
-                                    sugg_df["end_address"].values):
-                self._latlng_to_addr[latlng] = str(addr)
-
         # --- training lookup tables (填入 fit) ---
         self._uc3: dict = {}
         self._uc2: dict = {}
-        self._ua: dict = {}
         self._us: dict = {}
         self._sc: dict = {}
         self._sa: dict = {}
+        # GC 保留作為 fallback 補充預測清單用，不參與權重評分
         self._gc: dict = {}
-        self._u_addr: dict = {}
         self._global_top: list[str] = []
 
     def fit(self, train_df: pd.DataFrame) -> "SuggestionFusion":
         decay = self.decay_rate
-        l2a = self._latlng_to_addr
-        has_poi = len(l2a) > 0
 
         ref_time = train_df["created_at"].max()
         ref_ns = ref_time.value if hasattr(ref_time, "value") else pd.Timestamp(ref_time).value
@@ -102,12 +88,10 @@ class SuggestionFusion:
 
         uc3 = defaultdict(lambda: defaultdict(float))
         uc2 = defaultdict(lambda: defaultdict(float))
-        ua = defaultdict(lambda: defaultdict(float))
         us = defaultdict(lambda: defaultdict(float))
         sc = defaultdict(lambda: defaultdict(int))
         sa = defaultdict(lambda: defaultdict(int))
         gc: dict = defaultdict(int)
-        u_addr = defaultdict(float)
 
         cols = train_df[["uid_hash", "start_latlng", "end_latlng",
                          "hour_type", "is_holiday", "dayofweek"]].values
@@ -118,24 +102,17 @@ class SuggestionFusion:
             w = dw[i]
             uc3[(uid, hour, holiday, dow)][end] += w
             uc2[(uid, hour, holiday)][end] += w
-            ua[uid][end] += w
             us[(uid, start)][end] += w
             sc[(start, hour, holiday)][end] += 1
             sa[start][end] += 1
             gc[end] += 1
-            if has_poi:
-                addr = l2a.get(end)
-                if addr:
-                    u_addr[(uid, addr)] += w
 
         self._uc3 = {k: dict(v) for k, v in uc3.items()}
         self._uc2 = {k: dict(v) for k, v in uc2.items()}
-        self._ua = {k: dict(v) for k, v in ua.items()}
         self._us = {k: dict(v) for k, v in us.items()}
         self._sc = {k: dict(v) for k, v in sc.items()}
         self._sa = {k: dict(v) for k, v in sa.items()}
         self._gc = dict(gc)
-        self._u_addr = dict(u_addr)
         self._global_top = sorted(gc, key=gc.get, reverse=True)[:50]
 
         return self
@@ -145,13 +122,9 @@ class SuggestionFusion:
         log1p = math.log1p
         uc3 = self._uc3
         uc2 = self._uc2
-        ua = self._ua
         us_dict = self._us
         sc_dict = self._sc
         sa = self._sa
-        gc = self._gc
-        u_addr = self._u_addr
-        l2a = self._latlng_to_addr
         l2p = self._latlng_to_pin
         sugg_dests = self._user_sugg_dests
         global_top = self._global_top
@@ -174,7 +147,6 @@ class SuggestionFusion:
             # --- 2. 評分 ---
             s_uc3 = uc3.get((uid, hour, holiday, dow), {})
             s_uc2 = uc2.get((uid, hour, holiday), {})
-            s_ua = ua.get(uid, {})
             s_us = us_dict.get((uid, start), {})
             s_sc = sc_dict.get((start, hour, holiday), {})
             s_sa = sa.get(start, {})
@@ -204,20 +176,13 @@ class SuggestionFusion:
                     except:
                         pass
 
-                # POI
-                addr = l2a.get(end)
-                poi_s = log1p(u_addr.get((uid, addr), 0)) if addr else 0.0
-
                 score = (
                     w[0] * log1p(s_uc3.get(end, 0))
                     + w[1] * log1p(s_uc2.get(end, 0))
-                    + w[2] * log1p(s_ua.get(end, 0))
-                    + w[3] * log1p(s_us.get(end, 0))
-                    + w[4] * log1p(s_sc.get(end, 0))
-                    + w[5] * log1p(s_sa.get(end, 0))
-                    + w[6] * log1p(gc.get(end, 0))
-                    + w[7] * poi_s
-                    + w[8] * dist_score
+                    + w[2] * log1p(s_us.get(end, 0))
+                    + w[3] * log1p(s_sc.get(end, 0))
+                    + w[4] * log1p(s_sa.get(end, 0))
+                    + w[5] * dist_score
                 )
                 scored.append((score, end))
 
@@ -236,7 +201,7 @@ class SuggestionFusion:
                             picks.append(x); seen.add(x)
                             if len(picks) == k: break
                     if len(picks) == k: break
-                # 最後: global
+                # 最後: global fallback
                 if len(picks) < k:
                     for x in global_top:
                         if x not in seen:

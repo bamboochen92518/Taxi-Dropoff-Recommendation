@@ -28,12 +28,9 @@
 ```
 score = w0 · log(1 + count[user, hour, holiday, dow → end])
       + w1 · log(1 + count[user, hour, holiday → end])
-      + w2 · log(1 + count[user → end])
       + w3 · log(1 + count[user, start → end])
       + w4 · log(1 + count[start, hour, holiday → end])
       + w5 · log(1 + count[start → end])
-      + w6 · log(1 + count[global → end])
-      + w7 · log(1 + score[user, address → end])
       + w8 · 1/(1 + distance_km)
 ```
 
@@ -42,7 +39,7 @@ score = w0 · log(1 + count[user, hour, holiday, dow → end])
 ### 最佳權重（val grid search）
 
 ```
-w = [3.0, 10.0, 0.0, 10.0, 3.0, 0.5, 0.0, 0.0, 0.1]
+w = [3.0, 10.0, 10.0, 3.0, 0.5, 0.1]
 ```
 
 `user × (hour, holiday)` 與 `user × start` 為最強信號（各 10），捕捉時段習慣與通勤模式。
@@ -63,7 +60,7 @@ python suggestion_fusion/diagnose_suggestion.py
 
 # val 評估，使用最佳參數
 python suggestion_fusion/run_suggestion.py \
-    --weights 3.0 10.0 0.0 10.0 3.0 0.5 0.0 0.0 0.1
+    --weights 3.0 10.0 10.0 3.0 0.5 0.1
 
 # val 評估，使用預設參數
 python suggestion_fusion/run_suggestion.py
@@ -74,11 +71,11 @@ python suggestion_fusion/run_suggestion.py --grid-search
 # test 評估
 python suggestion_fusion/run_suggestion.py \
     --split test \
-    --weights 3.0 10.0 0.0 10.0 3.0 0.5 0.0 0.0 0.1
+    --weights 3.0 10.0 10.0 3.0 0.5 0.1
 
 # per-segment 分析
 python suggestion_fusion/run_suggestion.py \
-    --weights 3.0 10.0 0.0 10.0 3.0 0.5 0.0 0.0 0.1 \
+    --weights 3.0 10.0 10.0 3.0 0.5 0.1 \
     --segment
 ```
 
