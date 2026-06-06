@@ -1,3 +1,4 @@
+
 """跑 SuggestionFusion。
 
 用法:
@@ -19,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from data_loader import load_split
 from evaluate import evaluate, evaluate_by_segment, user_freq_bucket
 from read_parquet import SUGG_PATH, read_parquet_cols
-from suggestion import SuggestionFusion
+from suggestion_fusion import SuggestionFusion
 
 
 def run_single(model, train_df, eval_df, ks, label=None):
@@ -45,20 +46,21 @@ def grid_search(train_df, eval_df, sugg_df, target_k=5):
     truths = eval_df["end_latlng"].tolist()
 
     print("\n" + "=" * 60)
-    print("Grid search: SuggestionFusion 6 weights")
+    print("Grid search: SuggestionFusion 9 weights")
     print("=" * 60)
 
-    current_w = [3.0, 10.0, 10.0, 3.0, 0.5, 0.1]
+    # 初始權重
+    current_w = [4.0, 5.0, 5.0, 3.0, 0.3, 0.5, 0.1, 2.0, 0.5]
     names = [
-        "w0:user×ctx3", "w1:user×ctx2", "w2:user×start", 
-        "w3:start×ctx", "w4:start_all", "w5:distance",
+        "w0:user×ctx3", "w1:user×ctx2", "w2:user_all", "w3:user×start",
+        "w4:start×ctx", "w5:start_all", "w6:global", "w7:POI", "w8:distance",
     ]
     candidates = [0.0, 0.1, 0.3, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
 
     for iteration in range(3):
         print(f"\n--- Iteration {iteration + 1} ---")
         improved = False
-        for dim in range(6):
+        for dim in range(9):
             best_val = current_w[dim]
             best_score = -1
             for val in candidates:
@@ -100,7 +102,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--split", choices=["val", "test"], default="val")
     parser.add_argument("--k", type=int, nargs="+", default=[1, 3, 5])
-    parser.add_argument("--weights", type=float, nargs=6, default=None)
+    parser.add_argument("--weights", type=float, nargs=9, default=None)
     parser.add_argument("--grid-search", action="store_true")
     parser.add_argument("--segment", action="store_true")
     args = parser.parse_args()
@@ -117,7 +119,7 @@ def main():
         grid_search(train_df, eval_df, sugg_df)
         return
 
-    weights = args.weights or [3.0, 10.0, 10.0, 3.0, 0.5, 0.1]
+    weights = args.weights or [4.0, 5.0, 5.0, 3.0, 0.3, 0.5, 0.1, 2.0, 0.5]
     model = SuggestionFusion(sugg_df=sugg_df, weights=weights)
     preds = run_single(model, train_df, eval_df, args.k)
 
