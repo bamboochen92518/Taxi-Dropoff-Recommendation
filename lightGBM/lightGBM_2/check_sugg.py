@@ -1,6 +1,6 @@
 """確認 suggestion table 的重複行為與候選集分佈。在 meow2 上跑。"""
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from read_parquet import SUGG_PATH, read_parquet_cols
 import pandas as pd
 

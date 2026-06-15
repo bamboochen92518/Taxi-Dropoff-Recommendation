@@ -8,12 +8,12 @@ python run_gbm.py --segment
 # 跑 test (count 特徵用 train+val 重算)
 python run_gbm.py --split test
 
-# 與 SuggestionFusion 做 RRF ensemble
-python run_gbm.py --ensemble --segment
-
 # 存 / 載入模型
 python run_gbm.py --save model_gbm.txt
 python run_gbm.py --load model_gbm.txt --split test
+
+# feature importance
+python run_gbm.py --importance
 
 Leakage 防護 (關鍵)
 -------------------
@@ -32,14 +32,12 @@ import time
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from data_loader import load_split
 from evaluate import evaluate, evaluate_by_segment, user_freq_bucket
 from read_parquet import SUGG_PATH, read_parquet_cols
-from suggestion_fusion import SuggestionFusion
 from gbm_ranker import FeatureStore, GBMRanker
 
-BEST_V1 = [3.0, 10.0, 0.0, 10.0, 3.0, 0.5, 0.0, 0.0, 0.1]
 LABEL_WINDOW_DAYS = 14   # = val 視窗長度，使訓練結構對齊推論
 
 
@@ -59,29 +57,11 @@ def report(preds, truths, ks=(1, 3, 5), tag=""):
               f"NDCG@{k}={res.ndcg_at_k:.4f}  MRR={res.mrr:.4f}")
 
 
-def rrf_ensemble(rank_lists_a, rank_lists_b, k, c=60, wa=1.0, wb=1.0):
-    """Reciprocal Rank Fusion。輸入兩組「每 query 的 ranked candidate list」。"""
-    out = []
-    for la, lb in zip(rank_lists_a, rank_lists_b):
-        score = {}
-        for r, e in enumerate(la):
-            score[e] = score.get(e, 0.0) + wa / (c + r)
-        for r, e in enumerate(lb):
-            score[e] = score.get(e, 0.0) + wb / (c + r)
-        ranked = sorted(score, key=score.get, reverse=True)
-        out.append(ranked[:k])
-    return out
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--split", choices=["val", "test"], default="val")
     p.add_argument("--k", type=int, nargs="+", default=[1, 3, 5])
     p.add_argument("--segment", action="store_true")
-    p.add_argument("--ensemble", action="store_true",
-                   help="與 SuggestionFusion 做 RRF blend")
-    p.add_argument("--ens-wa", type=float, default=1.0, help="GBM 權重")
-    p.add_argument("--ens-wb", type=float, default=1.0, help="Fusion 權重")
     p.add_argument("--window-days", type=int, default=LABEL_WINDOW_DAYS)
     p.add_argument("--num-round", type=int, default=1500)
     p.add_argument("--early-stop", type=int, default=80)
@@ -135,7 +115,6 @@ def main():
 
         # val 作為 early-stopping 的 eval set (count 用整個 train)
         store_inf = FeatureStore(sugg_df).fit_counts(infer_period)
-        # 注意: early stopping 的 eval 一律用真實 val (不是 test)
         es_df = load_split("val")
         es_store = (store_inf if args.split == "val"
                     else FeatureStore(sugg_df).fit_counts(train_df))
@@ -165,40 +144,17 @@ def main():
     eval_feat = store_inf.build_features(eval_df, for_training=False)
     print(f"    無候選 fallback query={len(eval_feat['fallback_idx']):,}")
 
-    gbm_preds = ranker.predict_topk(eval_feat, store_inf, eval_df, k=max_k)
+    preds = ranker.predict_topk(eval_feat, store_inf, eval_df, k=max_k)
 
     print(f"\n=== GBM Ranker ({args.split}) ===")
-    report(gbm_preds, truths, args.k, tag="GBMRanker")
-
-    final_preds = gbm_preds
-    final_tag = "GBM"
-
-    # ---- Ensemble ----
-    if args.ensemble:
-        print("\n  跑 SuggestionFusion (取完整排序供 RRF) ...")
-        fusion = SuggestionFusion(sugg_df=sugg_df, weights=BEST_V1)
-        fusion.fit(infer_period)
-        fusion_full = fusion.predict_topk(eval_df, k=50)
-        gbm_full = ranker.predict_topk(eval_feat, store_inf, eval_df, k=50)
-
-        ens_preds = rrf_ensemble(gbm_full, fusion_full, k=max_k,
-                                 wa=args.ens_wa, wb=args.ens_wb)
-        print(f"\n=== RRF Ensemble (GBM×{args.ens_wa} + Fusion×{args.ens_wb}) ===")
-        report(ens_preds, truths, args.k, tag="Ensemble")
-        final_preds = ens_preds
-        final_tag = "Ensemble"
+    report(preds, truths, args.k, tag="GBMRanker")
 
     # ---- Per-segment ----
     if args.segment:
         seg = user_freq_bucket(train_df, eval_df)
-        print(f"\n# {final_tag} by user_freq_bucket (K={max_k})")
-        df = evaluate_by_segment(final_preds, truths, seg, k=max_k)
+        print(f"\n# GBM by user_freq_bucket (K={max_k})")
+        df = evaluate_by_segment(preds, truths, seg, k=max_k)
         print(df.to_string(index=False))
-
-        if args.ensemble:
-            print(f"\n# GBM (單獨) by user_freq_bucket (K={max_k})")
-            df2 = evaluate_by_segment(gbm_preds, truths, seg, k=max_k)
-            print(df2.to_string(index=False))
 
 
 if __name__ == "__main__":

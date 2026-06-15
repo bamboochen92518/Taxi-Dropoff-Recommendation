@@ -22,7 +22,7 @@ import time
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from data_loader import load_split
 from evaluate import evaluate, user_freq_bucket, evaluate_by_segment
 from read_parquet import SUGG_PATH, read_parquet_cols
